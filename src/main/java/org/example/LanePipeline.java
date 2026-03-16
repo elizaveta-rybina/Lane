@@ -6,6 +6,7 @@ import org.opencv.imgproc.Imgproc;
 
 /**
  * Пайплайн обработки кадра: фильтрация, детекция линий и обновление сглаженного состояния.
+ * Включает систему предупреждения о выезде с полосы (Lane Departure Warning).
  */
 public class LanePipeline {
 
@@ -15,15 +16,38 @@ public class LanePipeline {
     private final Mat maskedEdges = new Mat();
 
     private final LaneSmoother smoother;
+    private final LaneDepartureWarning ldw;
+    
+    // Параметры для преобразования пиксели -> метры
+    // Рассчитываются на основе размеров видео и конфигурации камеры
+    private double pixelsPerMeter = 40.0; // значение по умолчанию
 
-    public LanePipeline(double smoothingAlpha) {
+    /**
+     * @param smoothingAlpha коэффициент сглаживания (0.0 - 1.0)
+     * @param vehicleConfig конфигурация параметров автомобиля
+     * @param departureThreshold порог расстояния для срабатывания предупреждения (в метрах)
+     */
+    public LanePipeline(double smoothingAlpha, VehicleConfig vehicleConfig, double departureThreshold) {
         this.smoother = new LaneSmoother(smoothingAlpha);
+        this.ldw = new LaneDepartureWarning(vehicleConfig, departureThreshold);
+    }
+
+    /**
+     * Конструктор с параметрами по умолчанию.
+     * @param smoothingAlpha коэффициент сглаживания
+     */
+    public LanePipeline(double smoothingAlpha) {
+        this(smoothingAlpha, new VehicleConfig(), 0.3); // порог по умолчанию 0.3 метра
     }
 
     public LaneEstimate process(Mat frame) {
         double width = frame.width();
         double height = frame.height();
         double centerX = width / 2.0;
+
+        // Рассчитываем pixelsPerMeter один раз (примерно)
+        // Базируется на предположении, что видео снято с высоты ~1.2 м под углом ~45 градусов
+        calculatePixelsPerMeter(width, height);
 
         Imgproc.cvtColor(frame, gray, Imgproc.COLOR_BGR2GRAY);
         Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
@@ -90,7 +114,7 @@ public class LanePipeline {
             smoother.updateRight(currentTopX, currentSlope);
         }
 
-        return new LaneEstimate(
+        LaneEstimate estimate = new LaneEstimate(
                 smoother.getSmoothLeftTopX(),
                 smoother.getSmoothLeftSlope(),
                 smoother.getSmoothRightTopX(),
@@ -98,6 +122,61 @@ public class LanePipeline {
                 width,
                 height
         );
+
+        // Обновляем систему LDW
+        ldw.update(
+                estimate.leftTopX(), estimate.leftSlope(),
+                estimate.rightTopX(), estimate.rightSlope(),
+                width, height, pixelsPerMeter
+        );
+
+        return estimate;
+    }
+
+    /**
+     * Рассчитывает примерное количество пикселей на метр на основе размеров кадра.
+     * Это приблизительный расчет, основанный на типовых параметрах видеокамеры.
+     */
+    private void calculatePixelsPerMeter(double frameWidth, double frameHeight) {
+        // Типовое соотношение: для HD видео (640x480 или 1280x720) примерно 30-50 пикселей на метр
+        // Корректируем на основе высоты кадра
+        double basePPM = 40.0;
+        pixelsPerMeter = basePPM * (frameHeight / 480.0); // нормализуем по HD высоте
+    }
+
+    /**
+     * @return объект системы Lane Departure Warning
+     */
+    public LaneDepartureWarning getLDW() {
+        return ldw;
+    }
+
+    /**
+     * @return true если произошел выезд с полосы
+     */
+    public boolean isDeparture() {
+        return ldw.isDeparture();
+    }
+
+    /**
+     * @return true если левая сторона в опасности
+     */
+    public boolean isLeftWarning() {
+        return ldw.isLeftWarning();
+    }
+
+    /**
+     * @return true если правая сторона в опасности
+     */
+    public boolean isRightWarning() {
+        return ldw.isRightWarning();
+    }
+
+    /**
+     * @return минимальное расстояние до линии разметки (в метрах)
+     */
+    public double getMinDistance() {
+        return ldw.getMinDistance();
     }
 
     public void release() {
