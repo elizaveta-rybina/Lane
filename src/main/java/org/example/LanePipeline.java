@@ -1,188 +1,170 @@
 package org.example;
 
-import org.opencv.core.Mat;
-import org.opencv.core.Size;
+import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
+import java.util.ArrayList;
+import java.util.List;
 
-/**
- * Пайплайн обработки кадра: фильтрация, детекция линий и обновление сглаженного состояния.
- * Включает систему предупреждения о выезде с полосы (Lane Departure Warning).
- */
 public class LanePipeline {
-
-    private final Mat gray = new Mat();
-    private final Mat edges = new Mat();
-    private final Mat lines = new Mat();
-    private final Mat maskedEdges = new Mat();
-
+    
     private final LaneSmoother smoother;
     private final LaneDepartureWarning ldw;
-    
-    // Параметры для преобразования пиксели -> метры
-    // Рассчитываются на основе размеров видео и конфигурации камеры
-    private double pixelsPerMeter = 40.0; // значение по умолчанию
+    private double pixelsPerMeter = 40.0; 
 
-    /**
-     * @param smoothingAlpha коэффициент сглаживания (0.0 - 1.0)
-     * @param vehicleConfig конфигурация параметров автомобиля
-     * @param departureThreshold порог расстояния для срабатывания предупреждения (в метрах)
-     */
+    private Mat M = null;
+    private Mat invM = null;
+
+    // Храним текущие значения калибровки
+    private double currentTopY = 0.65;
+    private double currentTopWidth = 0.10;
+    private double currentBottomWidth = 0.80;
+
     public LanePipeline(double smoothingAlpha, VehicleConfig vehicleConfig, double departureThreshold) {
         this.smoother = new LaneSmoother(smoothingAlpha);
         this.ldw = new LaneDepartureWarning(vehicleConfig, departureThreshold);
     }
 
-    /**
-     * Конструктор с параметрами по умолчанию.
-     * @param smoothingAlpha коэффициент сглаживания
-     */
-    public LanePipeline(double smoothingAlpha) {
-        this(smoothingAlpha, new VehicleConfig(), 0.3); // порог по умолчанию 0.3 метра
+    // Метод обновления параметров с ползунков
+    public void updateCalibration(double topY, double topWidth, double bottomWidth) {
+        // Если значения изменились, обнуляем матрицы для их пересчета
+        if (this.currentTopY != topY || this.currentTopWidth != topWidth || this.currentBottomWidth != bottomWidth) {
+            this.currentTopY = topY;
+            this.currentTopWidth = topWidth;
+            this.currentBottomWidth = bottomWidth;
+            
+            if (M != null) { M.release(); M = null; }
+            if (invM != null) { invM.release(); invM = null; }
+        }
     }
 
     public LaneEstimate process(Mat frame) {
         double width = frame.width();
         double height = frame.height();
-        double centerX = width / 2.0;
 
-        // Рассчитываем pixelsPerMeter один раз (примерно)
-        // Базируется на предположении, что видео снято с высоты ~1.2 м под углом ~45 градусов
-        calculatePixelsPerMeter(width, height);
-
-        Imgproc.cvtColor(frame, gray, Imgproc.COLOR_BGR2GRAY);
-        Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
-        Imgproc.Canny(gray, edges, 50, 150);
-        LaneUtils.maskBottom40Percent(edges, maskedEdges);
-        Imgproc.HoughLinesP(maskedEdges, lines, 1, Math.PI / 180, 50, 50, 10);
-
-        double leftXSum = 0;
-        double leftYSum = 0;
-        double leftSlopeSum = 0;
-        int leftCount = 0;
-
-        double rightXSum = 0;
-        double rightYSum = 0;
-        double rightSlopeSum = 0;
-        int rightCount = 0;
-
-        for (int i = 0; i < lines.rows(); i++) {
-            double[] line = lines.get(i, 0);
-            double x1 = line[0];
-            double y1 = line[1];
-            double x2 = line[2];
-            double y2 = line[3];
-
-            if (x2 == x1) {
-                continue;
-            }
-
-            double slope = (y2 - y1) / (x2 - x1);
-            if (Math.abs(slope) < 0.4) {
-                continue;
-            }
-
-            if (slope < 0 && x1 < centerX && x2 < centerX) {
-                leftXSum += (x1 + x2);
-                leftYSum += (y1 + y2);
-                leftSlopeSum += slope;
-                leftCount += 2;
-            } else if (slope > 0 && x1 > centerX && x2 > centerX) {
-                rightXSum += (x1 + x2);
-                rightYSum += (y1 + y2);
-                rightSlopeSum += slope;
-                rightCount += 2;
-            }
+        if (M == null || invM == null) {
+            M = LaneUtils.getPerspectiveTransformMatrix(width, height, currentTopY, currentTopWidth, currentBottomWidth, false);
+            invM = LaneUtils.getPerspectiveTransformMatrix(width, height, currentTopY, currentTopWidth, currentBottomWidth, true);
         }
 
-        if (leftCount > 0) {
-            double avgX = leftXSum / leftCount;
-            double avgY = leftYSum / leftCount;
-            double currentSlope = leftSlopeSum / (leftCount / 2.0);
+        Mat binaryMask = LaneUtils.advancedThresholding(frame);
+        
+        Mat warped = new Mat();
+        Imgproc.warpPerspective(binaryMask, warped, M, new Size(width, height), Imgproc.INTER_LINEAR);
 
-            double b = avgY - currentSlope * avgX;
-            double currentTopX = (height * 0.65 - b) / currentSlope;
-            smoother.updateLeft(currentTopX, currentSlope);
+        int nwindows = 9;
+        int margin = 100;
+        int minpix = 50;
+        int windowHeight = (int) (height / nwindows);
+        
+        Mat bottomHalf = warped.submat((int) (height / 2), (int) height, 0, (int) width);
+        Mat hist = new Mat();
+        Core.reduce(bottomHalf, hist, 0, Core.REDUCE_SUM, CvType.CV_32S);
+        
+        Point minMaxLeft = Core.minMaxLoc(hist.colRange(0, (int) (width / 2))).maxLoc;
+        Point minMaxRight = Core.minMaxLoc(hist.colRange((int) (width / 2), (int) width)).maxLoc;
+        
+        int leftBase = (int) minMaxLeft.x;
+        int rightBase = (int) minMaxRight.x + (int) (width / 2);
+        
+        List<Point> leftPixels = new ArrayList<>();
+        List<Point> rightPixels = new ArrayList<>();
+
+        Mat nonZero = new Mat();
+        Core.findNonZero(warped, nonZero);
+        
+        int totalPoints = (int) nonZero.total();
+        int[] pointsData = new int[totalPoints * 2]; 
+        if (totalPoints > 0) {
+            nonZero.get(0, 0, pointsData);
+        }
+        
+        int leftCurrentX = leftBase;
+        int rightCurrentX = rightBase;
+        
+        for (int w = 0; w < nwindows; w++) {
+            int winYLow = (int) (height - (w + 1) * windowHeight);
+            int winYHigh = (int) (height - w * windowHeight);
+            
+            int winXLeftLow = leftCurrentX - margin;
+            int winXLeftHigh = leftCurrentX + margin;
+            int winXRightLow = rightCurrentX - margin;
+            int winXRightHigh = rightCurrentX + margin;
+            
+            List<Point> goodLeft = new ArrayList<>();
+            List<Point> goodRight = new ArrayList<>();
+            
+            for (int i = 0; i < totalPoints; i++) {
+                int px = pointsData[i * 2];
+                int py = pointsData[i * 2 + 1];
+                
+                if (py >= winYLow && py < winYHigh) {
+                    if (px >= winXLeftLow && px < winXLeftHigh) goodLeft.add(new Point(px, py));
+                    if (px >= winXRightLow && px < winXRightHigh) goodRight.add(new Point(px, py));
+                }
+            }
+            
+            leftPixels.addAll(goodLeft);
+            rightPixels.addAll(goodRight);
+            
+            if (goodLeft.size() > minpix) leftCurrentX = (int) getMeanX(goodLeft);
+            if (goodRight.size() > minpix) rightCurrentX = (int) getMeanX(goodRight);
         }
 
-        if (rightCount > 0) {
-            double avgX = rightXSum / rightCount;
-            double avgY = rightYSum / rightCount;
-            double currentSlope = rightSlopeSum / (rightCount / 2.0);
-
-            double b = avgY - currentSlope * avgX;
-            double currentTopX = (height * 0.65 - b) / currentSlope;
-            smoother.updateRight(currentTopX, currentSlope);
-        }
+        double[] leftPoly = polyFit(leftPixels, 2);
+        double[] rightPoly = polyFit(rightPixels, 2);
+        
+        binaryMask.release(); warped.release(); bottomHalf.release(); hist.release(); nonZero.release();
+        
+        smoother.updateLeft(leftPoly);
+        smoother.updateRight(rightPoly);
 
         LaneEstimate estimate = new LaneEstimate(
-                smoother.getSmoothLeftTopX(),
-                smoother.getSmoothLeftSlope(),
-                smoother.getSmoothRightTopX(),
-                smoother.getSmoothRightSlope(),
-                width,
-                height
+            smoother.getSmoothLeftPoly(),
+            smoother.getSmoothRightPoly(),
+            invM, width, height
         );
 
-        // Обновляем систему LDW
-        ldw.update(
-                estimate.leftTopX(), estimate.leftSlope(),
-                estimate.rightTopX(), estimate.rightSlope(),
-                width, height, pixelsPerMeter
-        );
-
+        ldw.update(estimate.leftPoly(), estimate.rightPoly(), width, height, pixelsPerMeter);
         return estimate;
     }
-
-    /**
-     * Рассчитывает примерное количество пикселей на метр на основе размеров кадра.
-     * Это приблизительный расчет, основанный на типовых параметрах видеокамеры.
-     */
-    private void calculatePixelsPerMeter(double frameWidth, double frameHeight) {
-        // Типовое соотношение: для HD видео (640x480 или 1280x720) примерно 30-50 пикселей на метр
-        // Корректируем на основе высоты кадра
-        double basePPM = 40.0;
-        pixelsPerMeter = basePPM * (frameHeight / 480.0); // нормализуем по HD высоте
+    
+    private double getMeanX(List<Point> pts) {
+        double sum = 0;
+        for (Point p : pts) sum += p.x;
+        return sum / pts.size();
+    }
+    
+    private double[] polyFit(List<Point> points, int degree) {
+        if (points.size() <= degree) return null;
+        
+        Mat A = new Mat(points.size(), degree + 1, CvType.CV_64F);
+        Mat B = new Mat(points.size(), 1, CvType.CV_64F);
+        
+        for (int i = 0; i < points.size(); i++) {
+            double y = points.get(i).y;
+            double x = points.get(i).x;
+            B.put(i, 0, x);
+            for (int j = 0; j <= degree; j++) {
+                A.put(i, j, Math.pow(y, degree - j));
+            }
+        }
+        
+        Mat result = new Mat();
+        Core.solve(A, B, result, Core.DECOMP_SVD);
+        
+        double[] coeffs = new double[degree + 1];
+        for (int i = 0; i <= degree; i++) coeffs[i] = result.get(i, 0)[0];
+        
+        A.release(); B.release(); result.release();
+        return coeffs;
     }
 
-    /**
-     * @return объект системы Lane Departure Warning
-     */
-    public LaneDepartureWarning getLDW() {
-        return ldw;
-    }
-
-    /**
-     * @return true если произошел выезд с полосы
-     */
-    public boolean isDeparture() {
-        return ldw.isDeparture();
-    }
-
-    /**
-     * @return true если левая сторона в опасности
-     */
-    public boolean isLeftWarning() {
-        return ldw.isLeftWarning();
-    }
-
-    /**
-     * @return true если правая сторона в опасности
-     */
-    public boolean isRightWarning() {
-        return ldw.isRightWarning();
-    }
-
-    /**
-     * @return минимальное расстояние до линии разметки (в метрах)
-     */
-    public double getMinDistance() {
-        return ldw.getMinDistance();
-    }
-
+    public boolean isDeparture() { return ldw.isDeparture(); }
+    public double getMinDistance() { return ldw.getMinDistance(); }
+    public LaneDepartureWarning getLDW() { return ldw; }
+    
     public void release() {
-        gray.release();
-        edges.release();
-        lines.release();
-        maskedEdges.release();
+        if (M != null) M.release();
+        if (invM != null) invM.release();
     }
 }

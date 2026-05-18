@@ -1,20 +1,20 @@
 package org.example;
 
+import org.opencv.core.Mat;
+
 /**
  * Результат оценки положения полос на одном кадре.
  *
- * @param leftTopX   X-координата верхней точки левой линии
- * @param leftSlope  наклон левой линии
- * @param rightTopX  X-координата верхней точки правой линии
- * @param rightSlope наклон правой линии
+ * @param leftPoly   коэффициенты полинома левой линии (A, B, C)
+ * @param rightPoly  коэффициенты полинома правой линии (A, B, C)
+ * @param invM       Матрица обратного перспективного преобразования для рендера
  * @param frameWidth ширина кадра
  * @param frameHeight высота кадра
  */
 public record LaneEstimate(
-        Double leftTopX,
-        Double leftSlope,
-        Double rightTopX,
-        Double rightSlope,
+        double[] leftPoly,
+        double[] rightPoly,
+        Mat invM,
         double frameWidth,
         double frameHeight
 ) {

@@ -2,11 +2,7 @@ package org.example;
 
 /**
  * Система предупреждения о выезде с полосы движения (Lane Departure Warning - LDW).
- * 
- * Реализует алгоритм из статьи:
- * - Рассчитывает расстояние от колеса автомобиля до линии разметки
- * - Определяет, произошел ли выезд за пределы допустимого расстояния
- * - Подает сигнал тревоги при опасен отклонении
+ * Использует полиномы для расчёта расстояния в перспективе Bird's-Eye View.
  */
 public class LaneDepartureWarning {
 
@@ -18,28 +14,12 @@ public class LaneDepartureWarning {
     private double leftDistance = Double.MAX_VALUE;
     private double rightDistance = Double.MAX_VALUE;
 
-    /**
-     * @param vehicleConfig конфигурация автомобиля (ширина полосы, ширина авто, и т.д.)
-     * @param departureThreshold расстояние (в метрах) до линии, при превышении которого подается предупреждение
-     */
     public LaneDepartureWarning(VehicleConfig vehicleConfig, double departureThreshold) {
         this.vehicleConfig = vehicleConfig;
         this.departureThreshold = departureThreshold;
     }
 
-    /**
-     * Обновляет состояние системы основываясь на текущем положении полос.
-     * 
-     * @param leftTopX X-координата верхней точки левой линии (в пикселях)
-     * @param leftSlope наклон левой линии
-     * @param rightTopX X-координата верхней точки правой линии (в пикселях)
-     * @param rightSlope наклон правой линии
-     * @param frameWidth ширина кадра (в пикселях)
-     * @param frameHeight высота кадра (в пикселях)
-     * @param pixelsPerMeter количество пикселей на один метр (для преобразования)
-     */
-    public void update(Double leftTopX, Double leftSlope,
-                      Double rightTopX, Double rightSlope,
+    public void update(double[] leftPoly, double[] rightPoly,
                       double frameWidth, double frameHeight,
                       double pixelsPerMeter) {
         
@@ -49,104 +29,51 @@ public class LaneDepartureWarning {
         rightDistance = Double.MAX_VALUE;
 
         double centerX = frameWidth / 2.0;
-        double vehicleBottomY = frameHeight; // предполагаем, что автомобиль внизу кадра
-        double vehicleTopY = frameHeight * 0.85; // примерное расположение верхней части лобового стекла
+        double vehicleBottomY = frameHeight; // Автомобиль находится в самом низу кадра Bird's-Eye View
 
-        // Расчет расстояния для левой линии
-        if (leftTopX != null && leftSlope != null && Math.abs(leftSlope) > 1e-6) {
-            double leftLineXAtVehicleBottom = calculateLineXAtY(leftTopX, leftSlope, frameHeight * 0.65, vehicleBottomY);
-            leftDistance = calculateDistanceToLine(centerX, leftLineXAtVehicleBottom, pixelsPerMeter);
+        // Половина ширины автомобиля в пикселях
+        double vehicleHalfWidthPx = (vehicleConfig.getVehicleWidthMeters() / 2.0) * pixelsPerMeter;
+
+        if (leftPoly != null && leftPoly.length >= 3) {
+            double leftLineX = evaluatePoly(leftPoly, vehicleBottomY);
             
-            // Левое колесо находится на расстоянии vehicleHalfWidth влево от центра
-            double leftWheelX = centerX - (vehicleConfig.getVehicleWidthMeters() / 2.0) * pixelsPerMeter;
-            double leftWheelDistanceToLine = calculateDistanceToLine(leftWheelX, leftLineXAtVehicleBottom, pixelsPerMeter);
+            // Левое колесо относительно центра
+            double leftWheelX = centerX - vehicleHalfWidthPx;
             
-            if (leftWheelDistanceToLine < departureThreshold) {
+            double pixelDistance = Math.abs(leftWheelX - leftLineX);
+            double lineMeters = pixelDistance / pixelsPerMeter;
+            leftDistance = lineMeters;
+            
+            if (lineMeters < departureThreshold) {
                 isLeftWarning = true;
-                leftDistance = leftWheelDistanceToLine;
             }
         }
 
-        // Расчет расстояния для правой линии
-        if (rightTopX != null && rightSlope != null && Math.abs(rightSlope) > 1e-6) {
-            double rightLineXAtVehicleBottom = calculateLineXAtY(rightTopX, rightSlope, frameHeight * 0.65, vehicleBottomY);
-            rightDistance = calculateDistanceToLine(centerX, rightLineXAtVehicleBottom, pixelsPerMeter);
+        if (rightPoly != null && rightPoly.length >= 3) {
+            double rightLineX = evaluatePoly(rightPoly, vehicleBottomY);
             
-            // Правое колесо находится на расстоянии vehicleHalfWidth вправо от центра
-            double rightWheelX = centerX + (vehicleConfig.getVehicleWidthMeters() / 2.0) * pixelsPerMeter;
-            double rightWheelDistanceToLine = calculateDistanceToLine(rightWheelX, rightLineXAtVehicleBottom, pixelsPerMeter);
+            // Правое колесо относительно центра
+            double rightWheelX = centerX + vehicleHalfWidthPx;
             
-            if (rightWheelDistanceToLine < departureThreshold) {
+            double pixelDistance = Math.abs(rightWheelX - rightLineX);
+            double lineMeters = pixelDistance / pixelsPerMeter;
+            rightDistance = lineMeters;
+            
+            if (lineMeters < departureThreshold) {
                 isRightWarning = true;
-                rightDistance = rightWheelDistanceToLine;
             }
         }
     }
 
-    /**
-     * Рассчитывает X-координату на линии для заданного Y.
-     * Используется уравнение линии: y = slope * x + b
-     */
-    private double calculateLineXAtY(double topX, double slope, double topY, double targetY) {
-        double b = topY - slope * topX;
-        return (targetY - b) / slope;
+    private double evaluatePoly(double[] poly, double y) {
+        return poly[0] * Math.pow(y, 2) + poly[1] * y + poly[2];
     }
 
-    /**
-     * Рассчитывает расстояние между точкой колеса и линией разметки (в метрах).
-     * Формулы основаны на принципах компьютерного зрения и геометрии.
-     */
-    private double calculateDistanceToLine(double wheelX, double lineX, double pixelsPerMeter) {
-        double pixelDistance = Math.abs(wheelX - lineX);
-        return pixelDistance / pixelsPerMeter;
-    }
-
-    /**
-     * @return true если левая сторона автомобиля опасно близко к левой разметке
-     */
-    public boolean isLeftWarning() {
-        return isLeftWarning;
-    }
-
-    /**
-     * @return true если правая сторона автомобиля опасно близко к правой разметке
-     */
-    public boolean isRightWarning() {
-        return isRightWarning;
-    }
-
-    /**
-     * @return true если произошел выезд с полосы с обеих сторон
-     */
-    public boolean isDeparture() {
-        return isLeftWarning || isRightWarning;
-    }
-
-    /**
-     * @return расстояние (в метрах) от левого колеса до левой разметки
-     */
-    public double getLeftDistance() {
-        return leftDistance;
-    }
-
-    /**
-     * @return расстояние (в метрах) от правого колеса до правой разметки
-     */
-    public double getRightDistance() {
-        return rightDistance;
-    }
-
-    /**
-     * @return минимальное расстояние от колеса до ближайшей линии разметки
-     */
-    public double getMinDistance() {
-        return Math.min(leftDistance, rightDistance);
-    }
-
-    /**
-     * @return установленный порог предупреждения (в метрах)
-     */
-    public double getDepartureThreshold() {
-        return departureThreshold;
-    }
+    public boolean isLeftWarning() { return isLeftWarning; }
+    public boolean isRightWarning() { return isRightWarning; }
+    public boolean isDeparture() { return isLeftWarning || isRightWarning; }
+    public double getLeftDistance() { return leftDistance; }
+    public double getRightDistance() { return rightDistance; }
+    public double getMinDistance() { return Math.min(leftDistance, rightDistance); }
+    public double getDepartureThreshold() { return departureThreshold; }
 }

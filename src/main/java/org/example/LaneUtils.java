@@ -3,42 +3,67 @@ package org.example;
 import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 
-import java.util.ArrayList;
-import java.util.List;
-
-/**
- * Утилиты для операций с ROI и вспомогательной обработки кадров.
- */
 public class LaneUtils {
 
+    public static Mat advancedThresholding(Mat frame) {
+        Mat hls = new Mat();
+        Imgproc.cvtColor(frame, hls, Imgproc.COLOR_BGR2HLS);
+
+        Mat lChannel = new Mat();
+        Core.extractChannel(hls, lChannel, 1);
+        Mat whiteMask = new Mat();
+        Imgproc.threshold(lChannel, whiteMask, 200, 255, Imgproc.THRESH_BINARY);
+
+        Mat yellowMask = new Mat();
+        Core.inRange(hls, new Scalar(15, 30, 115), new Scalar(35, 204, 255), yellowMask);
+
+        Mat sobelX = new Mat();
+        Imgproc.Sobel(lChannel, sobelX, CvType.CV_64F, 1, 0, 3, 1, 0, Core.BORDER_DEFAULT);
+        Core.convertScaleAbs(sobelX, sobelX);
+        Mat sobelMask = new Mat();
+        Imgproc.threshold(sobelX, sobelMask, 30, 255, Imgproc.THRESH_BINARY);
+
+        Mat combined = new Mat();
+        Core.bitwise_or(whiteMask, yellowMask, combined);
+        Core.bitwise_or(combined, sobelMask, combined);
+
+        hls.release(); lChannel.release(); whiteMask.release(); 
+        yellowMask.release(); sobelX.release(); sobelMask.release();
+
+        return combined;
+    }
+
     /**
-     * Применяет трапецеидальную маску, покрывающую нижние 40% кадра.
-     *
-     * @param source      исходная матрица (обычно карта границ)
-     * @param destination выходная матрица после применения маски
+     * Динамический расчет матриц перспективы
      */
-    public static void maskBottom40Percent(Mat source, Mat destination) {
-        Mat mask = Mat.zeros(source.size(), source.type());
+    public static Mat getPerspectiveTransformMatrix(double w, double h, double topY, double topWidth, double bottomWidth, boolean inverse) {
+        
+        double topLeftX = 0.5 - (topWidth / 2.0);
+        double topRightX = 0.5 + (topWidth / 2.0);
+        double bottomLeftX = 0.5 - (bottomWidth / 2.0);
+        double bottomRightX = 0.5 + (bottomWidth / 2.0);
 
-        int w = source.width();
-        int h = source.height();
+        Point[] src = new Point[]{
+            new Point(w * topLeftX, h * topY),     
+            new Point(w * topRightX, h * topY),    
+            new Point(w * bottomLeftX, h),         
+            new Point(w * bottomRightX, h)         
+        };
+        
+        // В проекции сверху линии делаем идеально параллельными (отступаем 20% от краев)
+        Point[] dst = new Point[]{
+            new Point(w * 0.2, 0),         
+            new Point(w * 0.8, 0),         
+            new Point(w * 0.2, h),         
+            new Point(w * 0.8, h)          
+        };
+        
+        MatOfPoint2f srcMat = new MatOfPoint2f(src);
+        MatOfPoint2f dstMat = new MatOfPoint2f(dst);
 
-        int topY = (int) (h * 0.60);
-
-        Point p1 = new Point(0, h);
-        Point p2 = new Point(w, h);
-        Point p3 = new Point(w * 0.90, topY);
-        Point p4 = new Point(w * 0.10, topY);
-
-        MatOfPoint polygon = new MatOfPoint(p1, p2, p3, p4);
-        List<MatOfPoint> list = new ArrayList<>();
-        list.add(polygon);
-
-        Imgproc.fillPoly(mask, list, new Scalar(255));
-
-        Core.bitwise_and(source, mask, destination);
-
-        mask.release();
-        polygon.release();
+        if (inverse) {
+             return Imgproc.getPerspectiveTransform(dstMat, srcMat);
+        }
+        return Imgproc.getPerspectiveTransform(srcMat, dstMat);
     }
 }

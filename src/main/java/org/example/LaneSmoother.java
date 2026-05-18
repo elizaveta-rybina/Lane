@@ -1,57 +1,47 @@
 package org.example;
 
 /**
- * Хранит и сглаживает параметры полос между кадрами.
+ * Хранит и сглаживает коэффициенты полиномов полос между кадрами (X = A*Y^2 + B*Y + C).
  */
 public class LaneSmoother {
 
     private final double alpha;
 
-    private Double smoothLeftTopX;
-    private Double smoothRightTopX;
-    private Double smoothLeftSlope;
-    private Double smoothRightSlope;
+    private double[] smoothLeftPoly;
+    private double[] smoothRightPoly;
 
     public LaneSmoother(double alpha) {
         this.alpha = alpha;
     }
 
-    public void updateLeft(double currentTopX, double currentSlope) {
-        if (smoothLeftTopX == null) {
-            smoothLeftTopX = currentTopX;
-            smoothLeftSlope = currentSlope;
+    public void updateLeft(double[] currentPoly) {
+        if (currentPoly == null) return;
+        if (smoothLeftPoly == null) {
+            smoothLeftPoly = currentPoly.clone();
             return;
         }
-
-        smoothLeftTopX = blend(smoothLeftTopX, currentTopX);
-        smoothLeftSlope = blend(smoothLeftSlope, currentSlope);
+        for (int i = 0; i < 3; i++) {
+            smoothLeftPoly[i] = blend(smoothLeftPoly[i], currentPoly[i]);
+        }
     }
 
-    public void updateRight(double currentTopX, double currentSlope) {
-        if (smoothRightTopX == null) {
-            smoothRightTopX = currentTopX;
-            smoothRightSlope = currentSlope;
+    public void updateRight(double[] currentPoly) {
+        if (currentPoly == null) return;
+        if (smoothRightPoly == null) {
+            smoothRightPoly = currentPoly.clone();
             return;
         }
-
-        smoothRightTopX = blend(smoothRightTopX, currentTopX);
-        smoothRightSlope = blend(smoothRightSlope, currentSlope);
+        for (int i = 0; i < 3; i++) {
+            smoothRightPoly[i] = blend(smoothRightPoly[i], currentPoly[i]);
+        }
     }
 
-    public Double getSmoothLeftTopX() {
-        return smoothLeftTopX;
+    public double[] getSmoothLeftPoly() {
+        return smoothLeftPoly;
     }
 
-    public Double getSmoothRightTopX() {
-        return smoothRightTopX;
-    }
-
-    public Double getSmoothLeftSlope() {
-        return smoothLeftSlope;
-    }
-
-    public Double getSmoothRightSlope() {
-        return smoothRightSlope;
+    public double[] getSmoothRightPoly() {
+        return smoothRightPoly;
     }
 
     private double blend(double previous, double current) {
